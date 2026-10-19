@@ -578,11 +578,18 @@ function setupPermissions () {
       // микрофон/камера для звонков — только если источник доверенный
       return callback(isTrusted(details.requestingUrl || ''))
     }
+    if (permission === 'fullscreen') {
+      // HTML5-полноэкранный режим (кнопка «развернуть» у видеоплеера).
+      // Раньше падал в общий callback(false) — плеер не мог развернуться.
+      // Доверенный источник только (у нас всегда web.max.ru).
+      return callback(isTrusted(details.requestingUrl || ''))
+    }
     callback(false)
   })
   session.defaultSession.setPermissionCheckHandler((wc, permission, requestingOrigin) => {
     if (permission === 'notifications') return state.config.notifications
     if (permission === 'media') return isTrusted(requestingOrigin)
+    if (permission === 'fullscreen') return isTrusted(requestingOrigin)
     return false
   })
 }
