@@ -127,7 +127,10 @@ const state = {
   config: loadConfig(),
   win: null,
   tray: null,
-  unread: 0,
+  unread: 0,          // непрочитанные ЧАТЫ (из заголовка окна)
+  unreadMessages: 0,  // непрочитанные СООБЩЕНИЯ (из DOM, сумма бейджей чатов)
+  trayUnreadIcon24: '',  // отрисованная рендером иконка трея с цифрой (1x)
+  trayUnreadIcon48: '',  // то же 2x
   forceQuit: false
 }
 
@@ -356,6 +359,36 @@ function injectTitlebar (win) {
     .then(() => wc.executeJavaScript(TB_JS, false))
     .then((r) => { if (r === 'no-body') setTimeout(() => injectTitlebar(win), 150) })
     .catch((e) => console.error('[max-electron] inject titlebar:', e && e.message))
+
+  // --- Счётчик непрочитанных СООБЩЕНИЙ: инжект watcher'а в страницу ---
+  injectUnreadWatcher(win)
+}
+
+// Базовые иконки трея как dataURL — их рисует рендер-процесс (canvas) поверх
+// с красным бейджем и числом сообщений, затем отдаёт готовый dataURL обратно.
+function trayBaseDataURLs () {
+  const one = () => {
+    const img = nativeImage.createFromPath(ICONS.tray)
+    return img.isEmpty() ? '' : img.toDataURL()
+  }
+  const two = () => {
+    const img = nativeImage.createFromPath(ICONS.tray2x)
+    return img.isEmpty() ? '' : img.toDataURL()
+  }
+  return { 24: one(), 48: two() }
+}
+
+function injectUnreadWatcher (win) {
+  if (!win || win.isDestroyed()) return
+  const wc = win.webContents
+  const src = fs.readFileSync(join(__dirname, 'assets', 'unread-watcher.js'), 'utf8')
+  const base = JSON.stringify(trayBaseDataURLs())
+  const boot = `window.__MAX_TRAY_BASE__ = ${base}; true`
+  Promise.resolve()
+    .then(() => wc.executeJavaScript(boot, false))
+    .then(() => wc.executeJavaScript(src, false))
+    .then((r) => { if (r === 'no-body') setTimeout(() => injectUnreadWatcher(win), 150) })
+    .catch((e) => console.error('[max-electron] inject unread watcher:', e && e.message))
 }
 
 // Обновление счётчика в титлбаре (вызывается из updateBadge)
@@ -386,6 +419,17 @@ function setupTitlebarIpc () {
   })
   ipcMain.on('shell:close', () => { if (state.win) state.win.close() })
   ipcMain.handle('shell:is-maximized', () => !!(state.win && state.win.isMaximized()))
+  ipcMain.on('shell:unread-messages', (_e, p) => onUnreadMessages(p))
+}
+
+// Приём числа непрочитанных сообщений от watcher'а в странице
+function onUnreadMessages (p) {
+  if (!p || typeof p.n !== 'number') return
+  if (p.icon24) state.trayUnreadIcon24 = p.icon24
+  if (p.icon48) state.trayUnreadIcon48 = p.icon48
+  if (p.n === state.unreadMessages) return
+  state.unreadMessages = p.n
+  updateTrayIcon()
 }
 
 function showWindow () {
@@ -437,9 +481,29 @@ function updateBadge () {
 
 function updateTrayIcon () {
   if (!state.tray) return
-  const img = state.unread > 0 ? ICONS.trayUnread : ICONS.tray
-  state.tray.setImage(img)
-  state.tray.setToolTip(state.unread > 0 ? `${APP_NAME} — ${state.unread} новых` : APP_NAME)
+  if (state.unreadMessages > 0) {
+    // цифра сообщений отрисована рендером (canvas) — берём готовую иконку
+    const d = state.trayUnreadIcon24
+    if (d) {
+      const img = nativeImage.createFromDataURL(d)
+      if (!img.isEmpty()) {
+        const hd = state.trayUnreadIcon48
+        if (hd) {
+          const img2 = nativeImage.createFromDataURL(hd)
+          if (!img2.isEmpty()) img.addRepresentation({ scaleFactor: 2, dataURL: hd })
+        }
+        state.tray.setImage(img)
+      } else {
+        state.tray.setImage(ICONS.trayUnread)
+      }
+    } else {
+      state.tray.setImage(ICONS.trayUnread)  // ещё не пришла цифра — точка
+    }
+    state.tray.setToolTip(`${APP_NAME} — ${state.unreadMessages} новых сообщений`)
+  } else {
+    state.tray.setImage(ICONS.tray)
+    state.tray.setToolTip(APP_NAME)
+  }
 }
 
 // ---------------------------------------------------------------------------

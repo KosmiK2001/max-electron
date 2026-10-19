@@ -17,5 +17,8 @@ contextBridge.exposeInMainWorld('maxShell', {
   isMaximized: () => ipcRenderer.invoke('shell:is-maximized'),
   onMaximizeChanged: (cb) => {
     ipcRenderer.on('shell:maximize-changed', (_e, max) => cb(!!max))
-  }
+  },
+  // Непрочитанные СООБЩЕНИЯ (считает инжект в странице) + готовые иконки трея.
+  // Только приём числа внутрь; страница не может ничего запросить/сделать.
+  setUnread: (payload) => ipcRenderer.send('shell:unread-messages', payload)
 })
