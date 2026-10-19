@@ -1,0 +1,9 @@
+{
+  "name": "max-electron",
+  "productName": "MAX",
+  "version": "1.0.0",
+  "description": "Native desktop wrapper for the MAX web messenger (web.max.ru) built on Electron",
+  "author": "kosmik2001",
+  "license": "GPL-3.0",
+  "main": "main.js"
+}
