@@ -4,7 +4,7 @@
 // Только встроенные модули Electron, без внешних npm-зависимостей:
 // весь код аудируем (в этом смысл проекта).
 
-const { app, BrowserWindow, Tray, Menu, MenuItem, NativeImage, shell, session, Notification, clipboard } = require('electron')
+const { app, BrowserWindow, Tray, Menu, MenuItem, NativeImage, shell, session, ipcMain } = require('electron')
 const { join } = require('path')
 const fs = require('fs')
 
@@ -86,6 +86,14 @@ function createWindow () {
     icon: ICONS.app,
     show: !state.config.startMinimized,
     autoHideMenuBar: true,
+    // --- CSD: собственный титлбар, не зависим от WM (Compiz/Emerald) ---
+    // frame:false убирает нативную рамку полностью; полосу заголовка рисуем
+    // сами (inject), контент страницы опускаем ниже через обёртку.
+    // titleBarOverlay НЕ используем: он рисует кнопки ПОВЕРХ контента,
+    // а web.max.ru имеет собственную шапку на всю ширину — получался
+    // «инородный кусок внутри окна».
+    frame: false,
+    backgroundColor: '#F4F6F9',
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -93,6 +101,15 @@ function createWindow () {
       preload: join(__dirname, 'preload.js'),
       spellcheck: true
     }
+  })
+
+  // Инъекция титлбара: на dom-ready и на каждом finish-load (SPA-переходы,
+  // reload). Функция идемпотентна — повторный вызов ничего не дублирует.
+  const inject = () => injectTitlebar(state.win)
+  state.win.webContents.on('dom-ready', inject)
+  state.win.webContents.on('did-finish-load', inject)
+  state.win.webContents.on('render-process-gone', (e, d) => {
+    console.error('[max-electron] renderer gone:', d && d.reason)
   })
 
   if (state.config.bounds && state.config.bounds.maximized) {
@@ -124,8 +141,8 @@ function createWindow () {
   }
   state.win.on('moved', remember)
   state.win.on('resized', remember)
-  state.win.on('maximize', remember)
-  state.win.on('unmaximize', remember)
+  state.win.on('maximize', () => { remember(); tbMaximized(true) })
+  state.win.on('unmaximize', () => { remember(); tbMaximized(false) })
 
   // Закрытие -> трей (иначе настоящий выход из меню трея)
   state.win.on('close', (e) => {
@@ -146,6 +163,151 @@ function isTrusted (url) {
     return ['max.ru', 'web.max.ru'].includes(h) || h.endsWith('.max.ru') ||
            h.endsWith('.vk.ru') || h.endsWith('.vk.com') || h === 'vk.com'
   } catch (e) { return false }
+}
+
+// ---------------------------------------------------------------------------
+// Собственный титлбар (CSD)
+//
+// Полоса 38px зафиксирована сверху, контент страницы переносится в обёртку
+// под неё. Обёртка нужна вместо padding на html/body: web.max.ru использует
+// height:100vh на корневом контейнере, и padding сдвинул бы контент, но
+// оставил бы 38px мёртвой зоны снизу. Перенос детей body в fixed-обёртку с
+// height:100% !important корректно гасит 100vh.
+// ---------------------------------------------------------------------------
+const TB_HEIGHT = 38
+
+const TB_CSS = `
+#max-shell-titlebar {
+  position: fixed !important; top: 0 !important; left: 0 !important; right: 0 !important;
+  height: ${TB_HEIGHT}px !important; z-index: 2147483647 !important;
+  display: flex !important; align-items: center !important; justify-content: space-between !important;
+  background: #F4F6F9 !important; color: #1B2430 !important;
+  border-bottom: 1px solid #DCE1E8 !important;
+  font: 500 13px/1 -apple-system, "Segoe UI", Roboto, "Noto Sans", sans-serif !important;
+  user-select: none !important; -webkit-user-select: none !important;
+  -webkit-app-region: drag !important; app-region: drag !important;
+}
+#max-shell-title { display: flex !important; align-items: center !important; gap: 8px !important; padding-left: 10px !important; }
+#max-shell-dot { width: 10px !important; height: 10px !important; border-radius: 50% !important; background: #2C7BE5 !important; }
+#max-shell-badge {
+  display: none !important; min-width: 18px !important; height: 18px !important; padding: 0 5px !important;
+  border-radius: 9px !important; background: #DD2C00 !important; color: #fff !important;
+  font-size: 11px !important; align-items: center !important; justify-content: center !important;
+}
+#max-shell-badge.on { display: inline-flex !important; }
+#max-shell-actions { display: flex !important; height: 100% !important; -webkit-app-region: no-drag !important; app-region: no-drag !important; }
+#max-shell-actions button {
+  all: unset !important; box-sizing: border-box !important;
+  width: 46px !important; height: 100% !important; display: flex !important;
+  align-items: center !important; justify-content: center !important;
+  color: #3A4656 !important; cursor: default !important;
+  border-left: 1px solid transparent !important;
+}
+#max-shell-actions button:hover { background: #E2E7EE !important; color: #0E141B !important; }
+#max-shell-actions button:active { background: #D3DAE3 !important; }
+#max-shell-close:hover { background: #E8503C !important; color: #fff !important; border-left-color: #E8503C !important; }
+#max-shell-actions svg { width: 14px !important; height: 14px !important; display: block !important; stroke: currentColor !important; stroke-width: 1.4 !important; fill: none !important; }
+#max-shell-content {
+  position: fixed !important; top: ${TB_HEIGHT}px !important; left: 0 !important; right: 0 !important; bottom: 0 !important;
+  overflow: hidden !important;
+}
+#max-shell-content > * { height: 100% !important; }
+`
+
+// Инъекция выполняется в главном мире страницы (executeJavaScript), поэтому
+// работает даже при contextIsolation: детям body придаётся обёртка, вешается
+// MutationObserver на случай портальных модалок, кнопки wired на preload-API.
+const TB_JS = `(async () => {
+  if (document.getElementById('max-shell-titlebar')) return 'exists'
+  if (!document.body) return 'no-body'
+
+  // 1. переносим весь контент body в фиксированную обёртку под титлбар
+  let wrap = document.getElementById('max-shell-content')
+  if (!wrap) {
+    wrap = document.createElement('div')
+    wrap.id = 'max-shell-content'
+    while (document.body.firstChild) wrap.appendChild(document.body.firstChild)
+    document.body.appendChild(wrap)
+  }
+
+  // 2. титлбар (вне обёртки, поверх всего)
+  const tb = document.createElement('div')
+  tb.id = 'max-shell-titlebar'
+  tb.innerHTML =
+    '<div id="max-shell-title"><span id="max-shell-dot"></span><span>MAX</span><span id="max-shell-badge"></span></div>' +
+    '<div id="max-shell-actions">' +
+      '<button id="max-shell-min" title="\u0421\u0432\u0435\u0440\u043d\u0443\u0442\u044c"><svg viewBox="0 0 14 14"><path d="M2 7h10"/></svg></button>' +
+      '<button id="max-shell-max" title="\u0420\u0430\u0437\u0432\u0435\u0440\u043d\u0443\u0442\u044c"><svg viewBox="0 0 14 14"><rect x="2.5" y="2.5" width="9" height="9" rx="1"/></svg></button>' +
+      '<button id="max-shell-close" title="\u0417\u0430\u043a\u0440\u044b\u0442\u044c"><svg viewBox="0 0 14 14"><path d="M3 3l8 8M11 3l-8 8"/></svg></button>' +
+    '</div>'
+  document.body.appendChild(tb)
+
+  // 3. кнопки -> preload API (window.maxShell)
+  const S = window.maxShell
+  const bind = (id, fn) => { const el = document.getElementById(id); if (el && S) el.addEventListener('click', fn) }
+  bind('max-shell-min', () => S.minimize())
+  bind('max-shell-max', () => S.toggleMaximize())
+  bind('max-shell-close', () => S.close())
+  tb.addEventListener('dblclick', (e) => { if (!e.target.closest('#max-shell-actions') && S) S.toggleMaximize() })
+  const setMaxGlyph = (max) => {
+    const b = document.getElementById('max-shell-max')
+    if (!b) return
+    b.innerHTML = max
+      ? '<svg viewBox="0 0 14 14"><rect x="2" y="4.5" width="7.5" height="7.5" rx="1"/><path d="M4.5 4.5v-2h7.5v7.5h-2"/></svg>'
+      : '<svg viewBox="0 0 14 14"><rect x="2.5" y="2.5" width="9" height="9" rx="1"/></svg>'
+    b.title = max ? '\u0412\u043e\u0441\u0441\u0442\u0430\u043d\u043e\u0432\u0438\u0442\u044c' : '\u0420\u0430\u0437\u0432\u0435\u0440\u043d\u0443\u0442\u044c'
+  }
+  if (S && S.onMaximizeChanged) S.onMaximizeChanged(setMaxGlyph)
+  if (S && S.isMaximized) S.isMaximized().then(setMaxGlyph).catch(() => {})
+
+  // 4. портальные вставки (модалки, прикрепляемые к body) держим под титлбаром
+  new MutationObserver((muts) => {
+    for (const m of muts) for (const n of m.addedNodes) {
+      if (n.nodeType === 1 && n.id !== 'max-shell-titlebar' && n.parentElement === document.body) wrap.appendChild(n)
+    }
+  }).observe(document.body, { childList: true })
+
+  return 'ok'
+})()`
+
+function injectTitlebar (win) {
+  if (!win || win.isDestroyed()) return
+  const wc = win.webContents
+  Promise.resolve()
+    .then(() => wc.insertCSS(TB_CSS))
+    .then(() => wc.executeJavaScript(TB_JS, false))
+    .then((r) => { if (r === 'no-body') setTimeout(() => injectTitlebar(win), 150) })
+    .catch((e) => console.error('[max-electron] inject titlebar:', e && e.message))
+}
+
+// Обновление счётчика в титлбаре (вызывается из updateBadge)
+function setTbBadge (count) {
+  if (!state.win || state.win.isDestroyed()) return
+  state.win.webContents.executeJavaScript(`(() => {
+    const b = document.getElementById('max-shell-badge')
+    if (!b) return
+    b.textContent = ${JSON.stringify(String(count))}
+    b.classList.toggle('on', ${count > 0})
+  })()`, false).catch(() => {})
+}
+
+// Синхронизация иконки кнопки «развернуть» с реальным состоянием окна
+function tbMaximized (max) {
+  if (!state.win || state.win.isDestroyed()) return
+  state.win.webContents.send('shell:maximize-changed', max)
+}
+
+// IPC для кнопок титлбара (preload отдаёт странице только window.maxShell с
+// этими четырьмя вызовами — никакой другой поверхности не экспортируется)
+function setupTitlebarIpc () {
+  ipcMain.on('shell:minimize', () => { if (state.win) state.win.minimize() })
+  ipcMain.on('shell:toggle-maximize', () => {
+    if (!state.win) return
+    if (state.win.isMaximized()) state.win.unmaximize()
+    else state.win.maximize()
+  })
+  ipcMain.on('shell:close', () => { if (state.win) state.win.close() })
+  ipcMain.handle('shell:is-maximized', () => !!(state.win && state.win.isMaximized()))
 }
 
 function showWindow () {
@@ -171,6 +333,7 @@ function onTitle (title) {
 
 function updateBadge () {
   if (!state.win) return
+  setTbBadge(state.unread)
   if (state.unread > 0) {
     const badge = NativeImage.createFromPath(ICONS.overlay)
     state.win.setOverlayIcon(badge, `Непрочитанных: ${state.unread}`)
@@ -243,11 +406,12 @@ function quit () {
 // Меню приложения (минимум: правка/вид/окно)
 // ---------------------------------------------------------------------------
 function buildAppMenu () {
+  const roles = (list) => list.map(role => ({ role }))
   const template = [
-    { label: APP_NAME, submenu: [ { role: 'about' }, { type: 'separator' }, { role: 'quit' } ] },
-    { label: 'Правка', submenu: [ 'undo', 'redo', { type: 'separator' }, 'cut', 'copy', 'paste', 'selectAll' ].map(r => ({ role: r })) },
-    { label: 'Вид', submenu: [ 'reload', 'forceReload', 'toggleDevTools', { type: 'separator' }, 'resetZoom', 'zoomIn', 'zoomOut', { type: 'separator' }, 'togglefullscreen' ].map(r => ({ role: r })) },
-    { label: 'Окно', submenu: [ 'minimize', 'zoom', 'close' ].map(r => ({ role: r })) }
+    { label: APP_NAME, submenu: [ { role: 'about' }, { role: 'separator' }, { role: 'quit' } ] },
+    { label: 'Правка', submenu: roles(['undo', 'redo', 'separator', 'cut', 'copy', 'paste', 'selectAll']) },
+    { label: 'Вид', submenu: roles(['reload', 'forceReload', 'toggleDevTools', 'separator', 'resetZoom', 'zoomIn', 'zoomOut', 'separator', 'togglefullscreen']) },
+    { label: 'Окно', submenu: roles(['minimize', 'zoom', 'close']) }
   ]
   Menu.setApplicationMenu(Menu.buildFromTemplate(template))
 }
@@ -277,7 +441,15 @@ function setupPermissions () {
 // ---------------------------------------------------------------------------
 function applyProxy () {
   const p = (state.config.proxy || '').trim()
-  if (!p) return
+  if (!p) {
+    // По умолчанию — ПРЯМОЕ соединение. Критично: иначе Chromium наследует
+    // HTTP(S)_PROXY/ALL_PROXY из окружения (на этой машине — xray
+    // 127.0.0.1:10809). MAX — российский, неблокируемый мессенджер; пускать
+    // его трафик через обход блокировок нельзя: это и утечка, и палево
+    // самой инфраструктуры обхода.
+    session.defaultSession.setProxy({ mode: 'direct' })
+    return
+  }
   const scheme = /^socks/i.test(p) ? 'socks5' : 'http'
   const rules = p.includes('://') ? p : `${scheme}://${p}`
   session.defaultSession.setProxy({ proxyRules: rules })
@@ -290,6 +462,7 @@ app.whenReady().then(() => {
   app.setName(APP_NAME)
   buildAppMenu()
   setupPermissions()
+  setupTitlebarIpc()
   applyProxy()
   createWindow()
   createTray()

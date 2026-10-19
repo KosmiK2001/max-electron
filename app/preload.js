@@ -1,10 +1,21 @@
 'use strict'
 
 // Preload работает в изолированном контексте (contextIsolation: true,
-// sandbox: true) и наружу ничего не отдаёт: веб-страница MAX не получает
-// ни require, ни ipcRenderer. Счётчик непрочитанных берётся из document.title
-// на стороне main-процесса (событие page-title-updated), поэтому здесь
-// специально делать нечего.
+// sandbox: true). Наружу отдаётся ровно ОДНА вещь: window.maxShell — четыре
+// вызова кнопок титлбара плюс подписка на смену состояния «развернуто».
+// Ни require, ни ipcRenderer, ни fs веб-странице MAX недоступны.
 //
-// Файл оставлен намеренно почти пустым: любая добавка сюда — это новая
-// поверхность атаки недоверенной веб-страницы на наш процесс.
+// Любая добавка сюда — новая поверхность атаки недоверенной страницы на наш
+// процесс, поэтому список намеренно минимальный и не расширяется «про запас».
+
+const { contextBridge, ipcRenderer } = require('electron')
+
+contextBridge.exposeInMainWorld('maxShell', {
+  minimize: () => ipcRenderer.send('shell:minimize'),
+  toggleMaximize: () => ipcRenderer.send('shell:toggle-maximize'),
+  close: () => ipcRenderer.send('shell:close'),
+  isMaximized: () => ipcRenderer.invoke('shell:is-maximized'),
+  onMaximizeChanged: (cb) => {
+    ipcRenderer.on('shell:maximize-changed', (_e, max) => cb(!!max))
+  }
+})
