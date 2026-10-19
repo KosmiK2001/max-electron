@@ -515,9 +515,21 @@ function createTray () {
   state.tray = new Tray(ICONS.tray)
   state.tray.setContextMenu(buildTrayMenu())
   state.tray.setToolTip(APP_NAME)
-  // Левый клик — показать/спрятать (правый — меню)
+  // Левый клик — показать/спрятать (правый — меню).
+  // Критерий — ТОЛЬКО видимость. isFocused() здесь использовать нельзя:
+  // когда клик приходит из overflow-попапа трея MATE, попап держит захват
+  // seats (pointer+keyboard, как меню), и X доносит до нашего окна
+  // FocusOut(NotifyGrab) ещё до нажатия — isFocused() гарантированно false.
+  // Значит ветка hide() была мёртвым кодом: из скрытого трея окно только
+  // переподнималось, но никогда не пряталось. То же самое для клика, когда
+  // пользователь работает в другом окне. Соседние обёртки (WhatsApp, Viber)
+  // считают toggle по isVisible() — держим ту же семантику.
   state.tray.on('click', () => {
-    if (state.win && state.win.isVisible() && state.win.isFocused()) state.win.hide()
+    const w = state.win
+    if (!w) return
+    // свернутое окно — не «спрятать», а «восстановить»: на Linux свёрнутое
+    // окно может оставаться isVisible(), так что проверяем оба признака
+    if (w.isVisible() && !w.isMinimized()) w.hide()
     else showWindow()
   })
   updateTrayIcon()
