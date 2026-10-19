@@ -4,7 +4,7 @@
 // Только встроенные модули Electron, без внешних npm-зависимостей:
 // весь код аудируем (в этом смысл проекта).
 
-const { app, BrowserWindow, Tray, Menu, MenuItem, NativeImage, shell, session, ipcMain } = require('electron')
+const { app, BrowserWindow, Tray, Menu, MenuItem, nativeImage, shell, session, ipcMain } = require('electron')
 const { join } = require('path')
 const fs = require('fs')
 
@@ -397,12 +397,22 @@ function showWindow () {
 }
 
 // ---------------------------------------------------------------------------
-// Непрочитанные: счёт из заголовка вкладки "(N)" — как в веб-версии.
-// Отсюда: оверлей на иконке в таскбаре, мигание рамки, смена иконки трея.
+// Непрочитанные: web.max.ru считает их в ЗАГОЛОВКЕ ОКНА, и формат — НЕ
+// whatsapp-овский «(N)», а «2 непрочитанных чата» / «1 непрочитанный чат» /
+// «5 непрочитанных сообщений» (проверено на живом окне). Старый парсер
+// /\((\d+)\)/ давал 0 всегда -> ни бейджа, ни красной точки на иконке трея.
+// Ловим оба формата. Отсюда: оверлей на иконке в таскбаре, мигание рамки,
+// смена иконки трея (tray-unread.png), счётчик в тултипе.
 // ---------------------------------------------------------------------------
+function parseUnread (title) {
+  let m = /\((\d+)\)/.exec(title)
+  if (m) return parseInt(m[1], 10)
+  m = /(\d+)\s+непрочитанн/i.exec(title)
+  return m ? parseInt(m[1], 10) : 0
+}
+
 function onTitle (title) {
-  const m = /\((\d+)\)/.exec(title)
-  const count = m ? parseInt(m[1], 10) : 0
+  const count = parseUnread(title)
   if (count === state.unread) return
   state.unread = count
   updateBadge()
@@ -413,7 +423,7 @@ function updateBadge () {
   if (!state.win) return
   setTbBadge(state.unread)
   if (state.unread > 0) {
-    const badge = NativeImage.createFromPath(ICONS.overlay)
+    const badge = nativeImage.createFromPath(ICONS.overlay)
     state.win.setOverlayIcon(badge, `Непрочитанных: ${state.unread}`)
     if (!state.win.isFocused() && !state.config.quietMode) {
       state.win.flashFrame(true)
