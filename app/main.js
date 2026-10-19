@@ -11,6 +11,84 @@ const fs = require('fs')
 const WEB_URL = 'https://web.max.ru/'
 const APP_NAME = 'MAX'
 
+// ---------------------------------------------------------------------------
+// Сетевая поверхность движка — БЕЛЫЙ СПИСОК.
+//
+// Фоновые службы Chromium (connectivity check clients3.google.com, CRL-сеты,
+// component update, variations, domain reliability, googleadservices) звонят
+// на хосты Google. На этой машине их IP лежат в ipset youtube.ip/google.ip,
+// mangle-цепочка VPN ставит трафику метку 0xa1, и служебщина движка молча
+// уходит в fastvpn-туннели, где TLS ломается (net_error -107) с
+// экспоненциальным ретраем — бесполезный шум И незваный гость в
+// инфраструктуре обхода.
+//
+// --disable-background-networking и компания (проверено 2026-10-19) ЭТОГО НЕ
+// Лечат: соединения к 1e100.net остаются. Поэтому режем на уровне резолвера:
+// MAP * ~NOTFOUND + EXCLUDE нужных доменов. Побочный эффект, который нам
+// только на руку: приложение больше не может сходить ни на один чужой хост —
+// ровно то «ограничить всё, что не требуется» из ТЗ.
+//
+// Белый список — по НАБЛЮДАЕМОМУ трафику (netlog движка + tcpdump SNI с
+// привязкой сокетов к процессу electron, 2026-10-19), а не по догадке из HTML:
+//   web.max.ru / max.ru     страница и база
+//   st.max.ru               ассеты (155.212.204.143)
+//   i.oneme.ru              АВАТАРЫ/КАРТИНКИ (155.212.204.142/.26/.68)
+//   api.oneme.ru            API (155.212.204.150/.194/.90)
+//   web.api.vk.ru           VK-API (87.240.137.x)
+//   max2-*.vkuser.net       ФОТО/ФАЙЛЫ (178.237.21.x)
+//   iv/vu/maxvd*.okcdn.ru   ВИДЕО (185.16.148.0, 83.222.28.17, 130.49.x)
+//   ok.ru / *.ms.ok.ru      VK-семейство (push)
+// Проверено: НИ ОДИН из этих IP не входит в ipset'ы обхода (youtube.ip,
+// google.ip, …) — приложение ходит напрямую.
+//
+// СОЗНАТЕЛЬНО ВЫРЕЗАНО (не входит в список):
+//   * sdk-api.apptracer.ru — VK-аналитика/телеметрия (в коде — обёртка
+//     apptracer_wrapped__, фон-события; к работе клиента не ответственна);
+//   * *.gvt1.com / redirector.gvt1.com — Google-загрузчик (component update);
+//   * *.google.com / 1e100.net — connectivity check, CRL, variations,
+//     domain reliability, googleadservices.
+// Именно эти адреса попадают в ipset'ы обхода и уходят в fastvpn-туннели
+// (net_error -107 с экспоненциальным ретраем).
+//
+// ВАЖНО про синтаксис (сожгли два прогона на этом): Grammar = список правил
+// через запятую, и КАЖДОЕ исключение требует СВОЙ ключевое слово EXCLUDE:
+//   MAP * ~NOTFOUND, EXCLUDE a.ru, EXCLUDE *.b.ru
+// Один «EXCLUDE a, b, c» парсер принимает только первый элемент, остальные —
+// "Failed parsing rule" (хост остаётся NOTFOUND).
+//
+// Переключатели подаются ДО app.ready() (иначе игнорируются).
+// ---------------------------------------------------------------------------
+const NET_ALLOWLIST = [
+  'max.ru', '*.max.ru',
+  'oneme.ru', '*.oneme.ru',
+  'vk.ru', '*.vk.ru',
+  'vkuser.net', '*.vkuser.net',
+  'okcdn.ru', '*.okcdn.ru',
+  'ok.ru', '*.ok.ru',
+  'localhost', '127.0.0.1',
+]
+
+for (const sw of [
+  'disable-background-networking',
+  'disable-component-update',
+  'disable-domain-reliability',
+  'disable-client-side-phishing-detection',
+  'disable-field-trial-config',
+  'disable-sync',
+  'disable-default-apps',
+]) {
+  app.commandLine.appendSwitch(sw)
+}
+app.commandLine.appendSwitch('disable-features', [
+  'NetworkTimeServiceQuerying',      // time.google.com
+  'OptimizationHints',               // предсказания переходов
+  'InterestFeedContentSuggestions',
+  'Translate',                       // translate.googleapis.com
+  'MediaRouter',                     // cast-дискавери
+].join(','))
+app.commandLine.appendSwitch('host-resolver-rules',
+  'MAP * ~NOTFOUND' + NET_ALLOWLIST.map(d => ', EXCLUDE ' + d).join(''))
+
 // Пользовательский агент: десктопный Chrome. Важно: web.max.ru по мобильному UA
 // предлагает скачать приложение, а по UA с "Electron" может отдать урезанную
 // версию — поэтому подменяем на чистый Chrome.
