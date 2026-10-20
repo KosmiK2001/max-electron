@@ -295,7 +295,13 @@ const TB_CSS = `
   display: flex !important; flex-direction: column !important; height: 100% !important;
   -webkit-app-region: no-drag !important; app-region: no-drag !important;
 }
-#max-shell-scroll button { width: 30px !important; height: auto !important; flex: 1 1 50% !important; }
+#max-shell-scroll button {
+  width: 30px !important; height: auto !important; flex: 1 1 50% !important;
+  /* no-drag наследуется по эффективному значению предков, но дублируем здесь:
+     если кнопка попадёт под drag-область, WM съест нажатие на себя и клик до
+     рендера не дойдёт вовсе — ровно тот симптом, что чинится этим релизом. */
+  -webkit-app-region: no-drag !important; app-region: no-drag !important;
+}
 #max-shell-scroll svg { width: 11px !important; height: 11px !important; }
 #max-shell-scroll.off { opacity: .35 !important; }
 #max-shell-content {
@@ -346,12 +352,14 @@ const TB_JS = `(async () => {
   // Кнопки прокрутки чата: идут не через preload, а напрямую в инжект
   // chat-scroller.js (тот же главный мир). Поэтому не требуют S (maxShell)
   // и вешаются отдельными слушателями.
-  const scrollBtn = (id, dir) => {
-    const el = document.getElementById(id)
-    if (el) el.addEventListener('click', () => { if (window.__maxShellScroll) window.__maxShellScroll.step(dir) })
-  }
-  scrollBtn('max-shell-scroll-up', -1)
-  scrollBtn('max-shell-scroll-down', 1)
+  // Делегирование на всю полосу: навешивать слушатель на конкретную кнопку
+  // нельзя — титлбар перерисовывается (setMaxGlyph меняет innerHTML), и
+  // привязка к узлу тихо теряется. closest() переживает замену узлов.
+  tb.addEventListener('click', (e) => {
+    const b = e.target && e.target.closest && e.target.closest('#max-shell-scroll-up, #max-shell-scroll-down')
+    if (!b || !window.__maxShellScroll) return
+    window.__maxShellScroll.click(b.id === 'max-shell-scroll-up' ? -1 : 1)
+  })
   // Приглушаем группу, когда нет открытого списка сообщений (нет чата,
   // загрузка, экран настроек) — иначе кнопки выглядят живыми, а мёртвые.
   setInterval(() => {

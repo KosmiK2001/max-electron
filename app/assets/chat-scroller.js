@@ -11,11 +11,17 @@
 //       <div class="scrollListContent scrollListContent--bottom">  <- flex-колонна
 //         <div data-index="0"> ... <div class="messageWrapper">    <- СООБЩЕНИЕ
 //
-// `data-index` проставляет сам ScrollList (w(()=>a(s,'data-index',R(i)))),
-// порядок детей = порядок сообщений в истории. Виртуализации нет: отрисованы
+// Порядок детей = порядок сообщений в истории. Виртуализации нет: отрисованы
 // все загруженные сообщения, история подгружается страницами по скроллу вверх
 // (onAfterScroll: top < 1500 -> backwardMarker). Значит «одно сообщение» =
-// соседний ребёнок контента, и его offsetTop честный.
+// соседний элемент списка, и его координата честная.
+//
+// Элементы списка ищем ДВУМЯ способами, по старшинству (v1.0.5 умел только
+// первый и молча не двигался, если web.max.ru не проставил data-index):
+//   1) дети контента с [data-index] — их проставляет ScrollList;
+//   2) потомки .messageWrapper — это сам пузырёк сообщения, он обязателен
+//      (на нём висит класс --isOut/--first/--last), поэтому надёжнее.
+// Какой способ сработал, отдаёт debug().itemsVia.
 //
 // Сам web.max.ru PageUp/PageDown НЕ обрабатывает: в бандле нет ни одной
 // строки `PageUp`/`PageDown` (есть ArrowUp/ArrowDown/Home/End/Escape/Enter —
@@ -93,19 +99,22 @@
     return pool[0]
   }
 
-  // Контент = ближайший общий предок элементов [data-index]. Глубину вложенности
-  // не предполагаем: базовый Scroll-компонент рендерит `.cropped > div > div`,
-  // а ScrollList внутрь слота добавляет ещё `before`-узел, так что «первый
-  // ребёнок скролла» — хрупкое предположение. Ищем по первому [data-index].
-  function contentOf (sc) {
-    const first = sc.querySelector('[data-index]')
-    return first ? first.parentElement : null
-  }
-
+  // Элементы списка + имя способа, которым нашли. Возвращаем {list, via}.
   function itemsOf (sc) {
-    const content = contentOf(sc)
-    if (!content) return []
-    return Array.prototype.slice.call(content.children).filter((el) => el.hasAttribute('data-index'))
+    // 1) [data-index]: контент = общий предок первых таких узлов (глубину
+    //    вложенности не предполагаем — у ScrollList в слоте стоит ещё
+    //    `before`-узел, так что «первый ребёнок скролла» ловушка).
+    const indexed = Array.prototype.slice.call(sc.querySelectorAll('[data-index]'))
+    if (indexed.length) {
+      const content = indexed[0].parentElement
+      const kids = Array.prototype.slice.call(content.children).filter((el) => el.hasAttribute('data-index'))
+      if (kids.length) return { list: kids, via: 'data-index' }
+    }
+    // 2) .messageWrapper — сам пузырёк сообщения. querySelectorAll отдаёт
+    //    документный порядок, он же порядок в истории.
+    const wrappers = Array.prototype.slice.call(sc.querySelectorAll('.messageWrapper'))
+    if (wrappers.length) return { list: wrappers, via: 'message-wrapper' }
+    return { list: [], via: 'none' }
   }
 
   // Абсолютные offsetTop детей контента относительно верха скролла.
@@ -131,7 +140,7 @@
   function page (dir) {
     const sc = pickScroller()
     if (!sc) return false
-    const items = itemsOf(sc)
+    const { list: items } = itemsOf(sc)
     const h = sc.clientHeight
     // страница = вьюпорт минус одно сообщение, чтобы следующая страница
     // начиналась с сообщения, которое было последним видимым (контекст не
@@ -146,17 +155,32 @@
     return true
   }
 
+  // Журнал последних нажатий кнопок: позволяет одной строкой в DevTools
+  // отличить «клик не дошёл до обработчика» (clicks не растёт) от «клик
+  // дошёл, но список сообщений не найден» (last.why = 'no-items').
+  const log = { clicks: 0, last: null }
+
   function step (dir) {
     const sc = pickScroller()
-    if (!sc) return false
-    const items = itemsOf(sc)
-    if (!items.length) return false
+    if (!sc) { log.last = { dir, why: 'no-scroller' }; return false }
+    const { list: items, via } = itemsOf(sc)
+    if (!items.length) { log.last = { dir, why: 'no-items', via }; return false }
     // behavior=instant, а не smooth: клик «вверх» во время летящей анимации
     // читал бы дробный scrollTop середины пути и второй нажатие давало бы
     // скачок на полтора сообщения (или ничего). Мгновенный шаг детерминирован
     // при любом темпе нажатий.
-    scroll(sc, nextTop(dir, sc.scrollTop, topsOf(sc, items), maxScroll(sc)), 'instant')
+    const from = sc.scrollTop
+    const to = nextTop(dir, from, topsOf(sc, items), maxScroll(sc))
+    scroll(sc, to, 'instant')
+    log.last = { dir, why: to === from ? 'at-edge' : 'ok', via, items: items.length, from: Math.round(from), to }
     return true
+  }
+
+  // Точка входа кнопок титлбара. Отдельно от step() потому, что только так
+  // можно по debug().clicks отличить «клик не дошёл» от «дошёл, но нечего крутить».
+  function click (dir) {
+    log.clicks++
+    return step(dir)
   }
 
   function available () {
@@ -207,17 +231,25 @@
   function debug () {
     const all = Array.prototype.slice.call(document.querySelectorAll('.scrollListScrollable'))
     const sc = pickScroller()
+    const { list, via } = sc ? itemsOf(sc) : { list: [], via: 'none' }
     return {
       scrollables: all.length,
       withMessages: all.filter((el) => !!el.querySelector('.messageWrapper')).length,
       picked: !!sc,
-      items: sc ? itemsOf(sc).length : 0,
+      itemsVia: via,
+      items: list.length,
       view: sc ? sc.clientHeight : 0,
       content: sc ? sc.scrollHeight : 0,
-      top: sc ? Math.round(sc.scrollTop) : null
+      top: sc ? Math.round(sc.scrollTop) : null,
+      clicks: log.clicks,
+      last: log.last
     }
   }
 
   window.__maxShellScroller = true
-  window.__maxShellScroll = { page, step, available, debug, _test: { pageTop, nextTop, clamp } }
+  window.__maxShellScroll = {
+    page, step, click, available, debug,
+    _log: log,
+    _test: { pageTop, nextTop, clamp, itemsOf, pickScroller }
+  }
 })()

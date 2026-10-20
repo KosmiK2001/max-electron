@@ -28,6 +28,7 @@ class El {
   }
   add (cls) { this.className = cls; return this }
   append (...kids) { for (const k of kids) { k.parentElement = this; this.children.push(k) } return this }
+  get id () { return this.attrs.get('id') || '' }   // в реальном DOM .id — стандартное свойство
   hasAttribute (n) { return this.attrs.has(n) }
   setAttribute (n, v) { this.attrs.set(n, String(v)) }
   get classList () {
@@ -46,6 +47,7 @@ class El {
       if (s.startsWith('.')) return this.className.split(/\s+/).includes(s.slice(1))
       if (s.startsWith('[role="')) return this.attrs.get('role') === s.slice(7, -1)
       if (s.startsWith('[') && s.endsWith(']')) return this.attrs.has(s.slice(1, -1))
+      if (s.startsWith('#')) return this.attrs.get('id') === s.slice(1)
       return false
     })
   }
@@ -61,6 +63,7 @@ class El {
     return out
   }
   querySelector (sel) { return this.descendants().find((e) => e.matches(sel)) || null }
+  querySelectorAll (sel) { return this.descendants().filter((e) => e.matches(sel)) }
   getBoundingClientRect () { return { top: this.rect.top, bottom: this.rect.top + this.rect.height, height: this.rect.height, width: this.clientWidth } }
   scrollTo ({ top, behavior }) { this.scrolled.push({ top, behavior }); this.scrollTop = top }
   get firstElementChild () { return this.children[0] || null }
@@ -77,7 +80,7 @@ const getComputedStyle = (el) => ({ overflowY: el.overflowY })
 
 // ------------------------------- сборка мира -------------------------------
 // Чат: H=400 вьюпорт, 8 сообщений высотой 100 => scrollHeight 800, max 400.
-function makeChat ({ id, heights, viewH = 400, inModal = false, withMessages = true, top = 100 }) {
+function makeChat ({ id, heights, viewH = 400, inModal = false, withMessages = true, top = 100, indexed = true }) {
   const total = heights.reduce((a, b) => a + b, 0)
   const sc = new El('div', 'scrollListScrollable')
   sc.clientHeight = viewH
@@ -94,7 +97,7 @@ function makeChat ({ id, heights, viewH = 400, inModal = false, withMessages = t
   content.append(new El('div', 'beforeSlot'))
   heights.forEach((h, i) => {
     const item = new El('div')
-    item.setAttribute('data-index', i)
+    if (indexed) item.setAttribute('data-index', i)
     const msg = new El('div', withMessages ? 'messageWrapper' : 'other')
     msg.rect = { top: 0, height: h }
     item.append(msg)
@@ -111,16 +114,19 @@ function makeChat ({ id, heights, viewH = 400, inModal = false, withMessages = t
   } else {
     body.append(sc)
   }
-  sc.id = id
+  sc.attrs.set('id', id)
   return sc
 }
 
 // пересчитать rect детей по текущему scrollTop: abs_top(item) = сумма высот до него
 function layout (sc) {
-  const items = sc.descendants().filter((e) => e.hasAttribute('data-index'))
+  let items = sc.descendants().filter((e) => e.hasAttribute('data-index'))
+  const indexed = items.length > 0
+  if (!indexed) items = sc.descendants().filter((e) => e.matches('.messageWrapper'))
   let acc = 0
   for (const item of items) {
-    const msg = item.children[0]
+    // с data-index пузырёк лежит внутри div-обёртки; без него список — сами пузырьки
+    const msg = indexed ? item.children[0] : item
     const abs = acc
     item.rect = { top: sc.rect.top + abs - sc.scrollTop, height: msg.rect.height }
     msg.rect.top = item.rect.top
@@ -250,11 +256,66 @@ check('Shift+PageDown в composer -> не лезем (выделение)', [fir
 
 // 8. диагностика не врёт: пустой body -> ничего не найдено
 body.children = []
-check('debug() на пустой странице', API.debug(), { scrollables: 0, withMessages: 0, picked: false, items: 0, view: 0, content: 0, top: null })
+const dEmpty = API.debug()
+check('debug() на пустой странице',
+  [dEmpty.scrollables, dEmpty.withMessages, dEmpty.picked, dEmpty.itemsVia, dEmpty.items, dEmpty.top, dEmpty.last.why],
+  [0, 0, false, 'none', 0, null, 'no-scroller'])
 const chat3 = makeChat({ id: 'chat3', heights: [100, 100, 100, 100, 100, 100, 100, 100] })
 const d = API.debug()
-check('debug() с чатом: 1 скролл, 8 сообщений, view 400, content 800',
-  [d.scrollables, d.withMessages, d.picked, d.items, d.view, d.content, d.top], [1, 1, true, 8, 400, 800, 400])
+check('debug() с чатом: 1 скролл, 8 сообщений через data-index, view 400, content 800',
+  [d.scrollables, d.withMessages, d.picked, d.itemsVia, d.items, d.view, d.content, d.top],
+  [1, 1, true, 'data-index', 8, 400, 800, 400])
+
+// 9. РЕГРЕСС v1.0.6: DOM без data-index (web.max.ru его не проставил) —
+//    шаг по сообщению обязан работать через .messageWrapper, а не молчать.
+body.children = []
+const noidx = makeChat({ id: 'noidx', heights: [100, 100, 100, 100, 100, 100, 100, 100], indexed: false })
+const dn = API.debug()
+check('itemsVia = message-wrapper', dn.itemsVia, 'message-wrapper')
+check('8 сообщений найдено без data-index', dn.items, 8)
+const beforeN = noidx.scrollTop
+API.step(-1)
+check('шаг ВВЕРХ работает без data-index', [noidx.scrollTop < beforeN, API.debug().last.why], [true, 'ok'])
+const afterUp = noidx.scrollTop
+API.step(1)
+check('шаг ВНИЗ работает без data-index', [noidx.scrollTop > afterUp, API.debug().last.why], [true, 'ok'])
+noidx.scrollTop = 0; layout(noidx)
+API.page(1)
+check('страница тоже работает без data-index', noidx.scrollTop, 300)
+
+// 10. Кнопки: делегированный слушатель на полосе + счётчик кликов.
+//     Проверяем ровно тот контракт, который навешивает TB_JS: клик по любой
+//     точке внутри кнопки (в т.ч. по вложенному <svg>) обязан дойти до API.
+body.children = []
+const cbtn = makeChat({ id: 'btn', heights: [100, 100, 100, 100, 100, 100, 100, 100] })
+const btnUp = new El('button'); btnUp.attrs.set('id', 'max-shell-scroll-up')
+const svgIn = new El('svg'); btnUp.append(svgIn)        // цель клика — внутренний узел
+const btnDn = new El('button'); btnDn.attrs.set('id', 'max-shell-scroll-down')
+const acts = new El('div'); acts.attrs.set('id', 'max-shell-actions')
+acts.append(btnUp, btnDn)
+const tbEl = new El('div'); tbEl.attrs.set('id', 'max-shell-titlebar')
+tbEl.append(acts)
+body.append(tbEl)
+// дословная копия делегирования из TB_JS (main.js): closest по id, вызов click(dir)
+const delegated = (e) => {
+  const b = e.target && e.target.closest && e.target.closest('#max-shell-scroll-up, #max-shell-scroll-down')
+  if (!b || !window.__maxShellScroll) return
+  window.__maxShellScroll.click(b.id === 'max-shell-scroll-up' ? -1 : 1)
+}
+const c0 = API.debug().clicks
+cbtn.scrollTop = 200; layout(cbtn)
+delegated({ target: svgIn })
+const d1 = API.debug()
+check('клик по внутреннему <svg> дошёл до API', [d1.clicks, d1.last.why, d1.last.dir], [c0 + 1, 'ok', -1])
+check('окно прокручено вверх на одно сообщение', cbtn.scrollTop, 100)
+delegated({ target: btnDn })
+check('клик вниз возвращает на сообщение', [API.debug().last.dir, cbtn.scrollTop], [1, 200])
+const d2 = API.debug()
+delegated({ target: new El('span') })          // клик мимо кнопок
+check('клик мимо кнопок ничего не считает', API.debug().clicks, d2.clicks)
+cbtn.scrollTop = 0; layout(cbtn)
+delegated({ target: btnUp })
+check('клик на самом верху -> at-edge, счётчик растёт', [API.debug().last.why, API.debug().clicks], ['at-edge', d2.clicks + 1])
 
 console.log('\n' + (fails ? 'ПРОВАЛОВ: ' + fails : 'ВСЁ ЗЕЛЁНО'))
 process.exit(fails ? 1 : 0)
