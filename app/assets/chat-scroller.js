@@ -1,5 +1,5 @@
-// Прокрутка чата: PageUp/PageDown = страница видимого чата, кнопки титлбара
-// «вверх/вниз» = одно сообщение. Выполняется в главном мире страницы (инжект
+// Прокрутка чата: PageUp/PageDown = страница видимого чата, ArrowUp/ArrowDown
+// и кнопки титлбара «вверх/вниз» = одно сообщение. Выполняется в главном мире страницы (инжект
 // из main.js), поэтому видит реальный DOM web.max.ru и window.__maxShellScroll.
 //
 // Где лежит список сообщений (вычитано из бандла web.max.ru, 2026-10-20):
@@ -24,10 +24,23 @@
 // Какой способ сработал, отдаёт debug().itemsVia.
 //
 // Сам web.max.ru PageUp/PageDown НЕ обрабатывает: в бандле нет ни одной
-// строки `PageUp`/`PageDown` (есть ArrowUp/ArrowDown/Home/End/Escape/Enter —
-// это навигация по composer и выделение). Браузерный фолбэк не работает,
-// потому что скроллится не документ, а div внутри clip-обёртки, и фокус
-// обычно в теле/composer => клавиша не делала ничего. Отсюда и фича.
+// строки `PageUp`/`PageDown`. Браузерный фолбэк не работает, потому что
+// скроллится не документ, а div внутри clip-обёртки.
+//
+// С ArrowUp/ArrowDown иначе: страница их обрабатывает, но НЕ в чате —
+//   1) базовый Scroll-компонент вешает roving-focus на сам скролл
+//      (`_e('keydown', ae, E)`, chunk D6e1cJjj): стрелки перемещают фокус
+//      между `button:not(:disabled)` ВНУТРИ скролла, с preventDefault +
+//      stopPropagation;
+//   2) редактор composer (ProseMirror-подобный) — каретка в многострочном
+//      поле, preventDefault по наличию selection;
+//   3) меню [role=menu], поиск по чату, timepicker, sortablejs — свои
+//      обработчики со stopPropagation.
+// В ЧАТЕ стрелки молчат по структурной причине: клик по сообщению ставит
+// фокус на `div.openedChat[tabindex=-1]` (и `main[tabindex=-1]`), а это
+// ПРЕДОК скролла, так что обработчик (1) события не видит вовсе, а
+// документ не скроллится. Лечим так: отдаём клавишу странице, когда фокус
+// на интерактивном узле (кейсы 1-3), и крутим чат во всех остальных.
 (() => {
   if (window.__maxShellScroller) return
 
@@ -199,29 +212,95 @@
     return null
   }
 
-  function onKeyDown (e) {
-    if (e.defaultPrevented) return
-    if (e.key !== 'PageUp' && e.key !== 'PageDown') return
-    if (e.ctrlKey || e.metaKey || e.altKey) return
-    const dir = e.key === 'PageDown' ? 1 : -1
-    const sc = pickScroller()
-    if (!sc) return
-    const t = e.target
-    if (t instanceof Element && t !== document.body) {
-      // У цели есть свой скроллимый предок (модалка, панель стикеров,
-      // многострочное поле) — не лезем: клавиша должна крутить его.
-      const own = scrollableAncestor(t)
-      if (own && own !== sc) return
-      // Shift+PageDown в поле ввода = расширение выделения, не прокрутка.
-      if (e.shiftKey && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return
+  // Узлы, чьи стрелки принадлежат странице: формы и элементы с ARIA-ролями,
+// где стрелки — навигация (меню, списки, слайдеры, диалоги). Обход ВВЕРХ от
+// activeElement, потому что фокус часто сидит на внутренней span/div
+// контрола, а не на самом кнопке/роли.
+  const ROLES = new Set([
+    'button', 'link', 'menuitem', 'menuitemcheckbox', 'menuitemradio', 'option',
+    'tab', 'checkbox', 'radio', 'switch', 'textbox', 'combobox', 'listbox',
+    'slider', 'spinbutton', 'treeitem', 'tree', 'grid', 'menu', 'menubar',
+    'dialog', 'alertdialog', 'radiogroup',
+  ])
+
+  function isInteractive (el) {
+    let n = el instanceof Element ? el : null
+    while (n && n !== document.body) {
+      const tag = n.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || tag === 'BUTTON' || tag === 'A') return true
+      if (n.isContentEditable) return true
+      const role = typeof n.getAttribute === 'function' ? n.getAttribute('role') : null
+      if (role && ROLES.has(role)) return true
+      n = n.parentElement
     }
-    e.preventDefault()
-    page(dir)
+    return false
   }
 
-  // capture: перехватываем раньше обработчиков страницы (у неё свои keydown
-  // на composer и выделение), но только для PageUp/PageDown — их страница
-  // не трогает вообще.
+  // Возвращает направление (1/-1) или null, если клавиша не наша.
+  // 'page' и 'step' — два разных действия; 'step' это ArrowUp/ArrowDown и
+  // кнопки титлбара, 'page' — PageUp/PageDown.
+  function actionFor (e) {
+    if (e.ctrlKey || e.metaKey || e.altKey) return null
+    switch (e.key) {
+      case 'PageDown': return 'page'
+      case 'PageUp': return 'page'
+      case 'ArrowDown': return 'step'
+      case 'ArrowUp': return 'step'
+    }
+    return null
+  }
+
+  function isEditable (el) {
+    let n = el instanceof Element ? el : null
+    while (n && n !== document.body) {
+      if (n.isContentEditable) return true
+      if (n.tagName === 'TEXTAREA' || n.tagName === 'INPUT' || n.tagName === 'SELECT') return true
+      n = n.parentElement
+    }
+    return false
+  }
+
+  function onKeyDown (e) {
+    if (e.defaultPrevented) return
+    const action = actionFor(e)
+    if (!action) return
+    const sc = pickScroller()
+    if (!sc) return
+
+    // Цель и держатель фокуса. Для стрелок важнее именно activeElement:
+    // событие идёт от того узла, что в фокусе, а вот фокус после клика по
+    // чату держит `div.openedChat[tabindex=-1]`.
+    const t = e.target
+    const a = document.activeElement
+    const chain = [t, a].filter((n) => n instanceof Element && n !== document.body)
+
+    if (chain.length) {
+      // У фокуса есть свой скроллимый предок (модалка, панель стикеров,
+      // переполненное поле) — не лезем: клавиша должна крутить его.
+      for (const n of chain) {
+        const own = scrollableAncestor(n)
+        if (own && own !== sc) return
+      }
+      // Стрелки на интерактивном узле принадлежат странице: каретка в
+      // composer, roving-focus в скролле, меню, поиск, timepicker,
+      // sortablejs. PageUp/PageDown страница не трогает вообще — их не
+      // отдаём, кроме редактирования с зажатым Shift (выделение).
+      if (action === 'step') {
+        for (const n of chain) if (isInteractive(n)) return
+      } else if (e.shiftKey) {
+        for (const n of chain) if (isEditable(n)) return
+      }
+    }
+
+    e.preventDefault()
+    if (action === 'page') page(e.key === 'PageDown' ? 1 : -1)
+    else step(e.key === 'ArrowDown' ? 1 : -1)
+  }
+
+  // capture: у страницы свои keydown-обработчики (composer, скролл-ровер,
+  // меню), и часть из них делает stopPropagation — в bubble-фазе мы бы
+  // события не дождались. Перехватываем на document и отдаём клавишу
+  // странице по признаку фокуса (isInteractive), а не по факту её обработки.
   document.addEventListener('keydown', onKeyDown, true)
 
   // Диагностика для живого DOM (DevTools -> __maxShellScroll.debug()): сколько

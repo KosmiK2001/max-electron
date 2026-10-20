@@ -29,6 +29,7 @@ class El {
   add (cls) { this.className = cls; return this }
   append (...kids) { for (const k of kids) { k.parentElement = this; this.children.push(k) } return this }
   get id () { return this.attrs.get('id') || '' }   // в реальном DOM .id — стандартное свойство
+  getAttribute (n) { return this.attrs.has(n) ? this.attrs.get(n) : null }
   hasAttribute (n) { return this.attrs.has(n) }
   setAttribute (n, v) { this.attrs.set(n, String(v)) }
   get classList () {
@@ -72,6 +73,7 @@ class El {
 const body = new El('body')
 const document = {
   body,
+  activeElement: body,   // в реальном DOM это всегда какой-то узел; клик по чату ставит div[tabindex=-1]
   addEventListener: (type, fn, capture) => { (document._h ||= []).push({ type, fn, capture }) },
   querySelectorAll (sel) { return body.descendants().filter((e) => e.matches(sel)) }
 }
@@ -316,6 +318,88 @@ check('клик мимо кнопок ничего не считает', API.deb
 cbtn.scrollTop = 0; layout(cbtn)
 delegated({ target: btnUp })
 check('клик на самом верху -> at-edge, счётчик растёт', [API.debug().last.why, API.debug().clicks], ['at-edge', d2.clicks + 1])
+
+// 11. СТРЕЛКИ (ArrowUp/ArrowDown) = одно сообщение. Главный кейс: после
+//     клика по чату фокус держит `div.openedChat[tabindex=-1]` — не-
+//     интерактивный ПРЕДОК скролла, поэтому обработчик roving-focus страницы
+//     (висит на самом скролле) события не видит и стрелка молчит.
+function arrowsSetup () {
+  body.children = []
+  const chatA = makeChat({ id: 'chatA', heights: [100, 100, 100, 100, 100, 100, 100, 100] })
+  const opened = new El('div', 'openedChat')
+  opened.setAttribute('tabindex', '-1')
+  body.append(opened)
+  opened.append(chatA)
+  return { chatA, opened }
+}
+const fireKey = (props) => {
+  let prevented = false
+  const e = Object.assign({
+    key: 'ArrowDown', ctrlKey: false, metaKey: false, altKey: false, shiftKey: false,
+    target: document.activeElement, defaultPrevented: false,
+    preventDefault () { prevented = true }
+  }, props)
+  document._h.filter((h) => h.type === 'keydown').forEach((h) => h.fn(e))
+  return prevented
+}
+
+const A1 = arrowsSetup()
+document.activeElement = A1.opened
+A1.chatA.scrollTop = 200; layout(A1.chatA)
+const p1 = fireKey({ key: 'ArrowDown', target: A1.opened })
+check('стрелка вниз при фокусе на openedChat крутит чат на сообщение',
+  [p1, A1.chatA.scrollTop, API.debug().last.why, API.debug().itemsVia], [true, 300, 'ok', 'data-index'])
+const p2 = fireKey({ key: 'ArrowUp', target: A1.opened })
+check('стрелка вверх возвращает на сообщение', [p2, A1.chatA.scrollTop], [true, 200])
+
+const A2 = arrowsSetup()
+const inner = new El('button')
+A2.chatA.append(inner)                    // кнопка ВНУТРИ скролла: ровер страницы
+document.activeElement = inner
+const before2 = A2.chatA.scrollTop
+const p3 = fireKey({ key: 'ArrowDown', target: inner })
+check('фокус на кнопке внутри чата -> стрелка остаётся странице',
+  [p3, A2.chatA.scrollTop === before2], [false, true])
+
+const A3 = arrowsSetup()
+const comp = new El('textarea')
+comp.scrollHeight = 40; comp.clientHeight = 40
+document.body.append(comp)
+document.activeElement = comp
+A3.chatA.scrollTop = 200; layout(A3.chatA)      // с середины: на упоре крутиться некуда
+const before3 = A3.chatA.scrollTop
+const p4 = fireKey({ key: 'ArrowDown', target: comp })
+check('стрелка в composer -> каретка, чат не трогаем', [p4, A3.chatA.scrollTop === before3], [false, true])
+const p5 = fireKey({ key: 'PageDown', target: comp })
+check('PageDown в composer -> крутим чат (страница его не трогает)',
+  [p5, A3.chatA.scrollTop > before3], [true, true])
+
+const A4 = arrowsSetup()
+document.activeElement = A4.opened
+A4.chatA.scrollTop = 800 - 400; layout(A4.chatA)
+const p6 = fireKey({ key: 'ArrowDown', target: A4.opened })
+check('стрелка на нижнем упоре -> at-edge, preventDefault есть',
+  [p6, API.debug().last.why, A4.chatA.scrollTop], [true, 'at-edge', 400])
+const p7 = fireKey({ key: 'ArrowLeft', target: A4.opened })
+check('ArrowLeft не наша клавиша', p7, false)
+const p8 = fireKey({ key: 'ArrowDown', target: A4.opened, ctrlKey: true })
+check('Ctrl+ArrowDown не перехватываем', p8, false)
+
+// стрелки внутри модалки: крутим список модалки, чат за её спиной — нет
+const A5 = arrowsSetup()
+const mList = makeChat({ id: 'mdl', heights: [80, 80, 80, 80, 80, 80, 80, 80], viewH: 300, inModal: true, top: 200 })
+const modalBox = body.descendants().find((e) => e.matches('.modal'))
+document.activeElement = modalBox
+A5.chatA.scrollTop = 200; layout(A5.chatA)
+mList.scrollTop = 200; layout(mList)            // с середины, см. выше
+const chatBefore = A5.chatA.scrollTop
+const mBefore = mList.scrollTop
+const p9 = fireKey({ key: 'ArrowDown', target: modalBox })
+check('стрелка в модалке крутит её список, а не чат',
+  [p9, mList.scrollTop !== mBefore, A5.chatA.scrollTop === chatBefore], [true, true, true])
+
+// чистим фокус обратно, чтобы не влиять на остальные проверки
+document.activeElement = body
 
 console.log('\n' + (fails ? 'ПРОВАЛОВ: ' + fails : 'ВСЁ ЗЕЛЁНО'))
 process.exit(fails ? 1 : 0)
