@@ -288,6 +288,16 @@ const TB_CSS = `
 #max-shell-actions button:active { background: #D3DAE3 !important; }
 #max-shell-close:hover { background: #E8503C !important; color: #fff !important; border-left-color: #E8503C !important; }
 #max-shell-actions svg { width: 14px !important; height: 14px !important; display: block !important; stroke: currentColor !important; stroke-width: 1.4 !important; fill: none !important; }
+/* Группа «прокрутка чата вверх/вниз» — уже кнопок окна, стек вертикально:
+   стрелка вверх над стрелкой вниз, как спиннер. Работает через инжект
+   chat-scroller.js (window.__maxShellScroll), не через preload-API. */
+#max-shell-scroll {
+  display: flex !important; flex-direction: column !important; height: 100% !important;
+  -webkit-app-region: no-drag !important; app-region: no-drag !important;
+}
+#max-shell-scroll button { width: 30px !important; height: auto !important; flex: 1 1 50% !important; }
+#max-shell-scroll svg { width: 11px !important; height: 11px !important; }
+#max-shell-scroll.off { opacity: .35 !important; }
 #max-shell-content {
   position: fixed !important; top: ${TB_HEIGHT}px !important; left: 0 !important; right: 0 !important; bottom: 0 !important;
   overflow: hidden !important;
@@ -317,7 +327,11 @@ const TB_JS = `(async () => {
   tb.innerHTML =
     '<div id="max-shell-title"><span id="max-shell-dot"></span><span>MAX</span><span id="max-shell-badge"></span></div>' +
     '<div id="max-shell-actions">' +
-      '<button id="max-shell-min" title="\u0421\u0432\u0435\u0440\u043d\u0443\u0442\u044c"><svg viewBox="0 0 14 14"><path d="M2 7h10"/></svg></button>' +
+      '<div id="max-shell-scroll">' +
+        '<button id="max-shell-scroll-up" title="\u041F\u0440\u043E\u043A\u0440\u0443\u0442\u0438\u0442\u044C \u0447\u0430\u0442 \u043D\u0430 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435 \u0432\u0432\u0435\u0440\u0445"><svg viewBox="0 0 14 14"><path d="M3.5 8.5L7 5l3.5 3.5"/></svg></button>' +
+        '<button id="max-shell-scroll-down" title="\u041F\u0440\u043E\u043A\u0440\u0443\u0442\u0438\u0442\u044C \u0447\u0430\u0442 \u043D\u0430 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435 \u0432\u043D\u0438\u0437"><svg viewBox="0 0 14 14"><path d="M3.5 5.5L7 9l3.5-3.5"/></svg></button>' +
+      '</div>' +
+      '<button id="max-shell-min" title="\u0421\u0432\u0435\u0440\u043D\u0443\u0442\u044C"><svg viewBox="0 0 14 14"><path d="M2 7h10"/></svg></button>' +
       '<button id="max-shell-max" title="\u0420\u0430\u0437\u0432\u0435\u0440\u043d\u0443\u0442\u044c"><svg viewBox="0 0 14 14"><rect x="2.5" y="2.5" width="9" height="9" rx="1"/></svg></button>' +
       '<button id="max-shell-close" title="\u0417\u0430\u043a\u0440\u044b\u0442\u044c"><svg viewBox="0 0 14 14"><path d="M3 3l8 8M11 3l-8 8"/></svg></button>' +
     '</div>'
@@ -329,6 +343,22 @@ const TB_JS = `(async () => {
   bind('max-shell-min', () => S.minimize())
   bind('max-shell-max', () => S.toggleMaximize())
   bind('max-shell-close', () => S.close())
+  // Кнопки прокрутки чата: идут не через preload, а напрямую в инжект
+  // chat-scroller.js (тот же главный мир). Поэтому не требуют S (maxShell)
+  // и вешаются отдельными слушателями.
+  const scrollBtn = (id, dir) => {
+    const el = document.getElementById(id)
+    if (el) el.addEventListener('click', () => { if (window.__maxShellScroll) window.__maxShellScroll.step(dir) })
+  }
+  scrollBtn('max-shell-scroll-up', -1)
+  scrollBtn('max-shell-scroll-down', 1)
+  // Приглушаем группу, когда нет открытого списка сообщений (нет чата,
+  // загрузка, экран настроек) — иначе кнопки выглядят живыми, а мёртвые.
+  setInterval(() => {
+    const g = document.getElementById('max-shell-scroll')
+    const A = window.__maxShellScroll
+    if (g) g.classList.toggle('off', !(A && A.available()))
+  }, 1000)
   tb.addEventListener('dblclick', (e) => { if (!e.target.closest('#max-shell-actions') && S) S.toggleMaximize() })
   const setMaxGlyph = (max) => {
     const b = document.getElementById('max-shell-max')
@@ -362,6 +392,27 @@ function injectTitlebar (win) {
 
   // --- Счётчик непрочитанных СООБЩЕНИЙ: инжект watcher'а в страницу ---
   injectUnreadWatcher(win)
+
+  // --- Прокрутка чата: PageUp/PageDown + кнопки титлбара ---
+  injectChatScroller(win)
+}
+
+// Инжект chat-scroller.js: отдельный файл (как unread-watcher.js), читается с
+// диска при каждом dom-ready/did-finish-load — идемпотентен по флагу
+// window.__maxShellScroller.
+function injectChatScroller (win) {
+  if (!win || win.isDestroyed()) return
+  const wc = win.webContents
+  let src
+  try {
+    src = fs.readFileSync(join(__dirname, 'assets', 'chat-scroller.js'), 'utf8')
+  } catch (e) {
+    console.error('[max-electron] read chat-scroller.js:', e && e.message)
+    return
+  }
+  Promise.resolve()
+    .then(() => wc.executeJavaScript(src, false))
+    .catch((e) => console.error('[max-electron] inject chat scroller:', e && e.message))
 }
 
 // Базовые иконки трея как dataURL — их рисует рендер-процесс (canvas) поверх
