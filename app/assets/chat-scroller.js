@@ -2,7 +2,7 @@
 // «вверх/вниз» = одно сообщение. Выполняется в главном мире страницы (инжект
 // из main.js), поэтому видит реальный DOM web.max.ru и window.__maxShellScroll.
 //
-// Где лежит список сообщений (вычитано из бандла web.max.ru, 2026-10-19):
+// Где лежит список сообщений (вычитано из бандла web.max.ru, 2026-10-20):
 // чат рендерится компонентом ScrollList (chunk CfBkgS-B) с align:'bottom',
 // а сам список — обёртка base-компонента Ua (chunk D6e1cJjj):
 //
@@ -25,7 +25,7 @@
 (() => {
   if (window.__maxShellScroller) return
 
-  // --- чистая математика (без DOM; покрыта юнит-стендом tray/scroll-*.js) ---
+  // --- чистая математика (без DOM; покрыта стендом test/chat-scroller-test.js) ---
 
   // Страница: сдвиг ровно на stepPx, в пределах [0, max].
   function pageTop (dir, cur, stepPx, max) {
@@ -77,8 +77,8 @@
     return el.clientWidth * el.clientHeight
   }
 
-  // Кандидаты: все живые scrollListScrollable. сообщенийые — те, внутри кого
-  // есть .messageWrapper. Модалки (multipins, поиск по чату) тоже рендерят
+  // Кандидаты: все живые scrollListScrollable, внутри которых есть
+  // .messageWrapper. Модалки (multipins, поиск по чату) тоже рендерят
   // сообщения через ScrollList — при открытой модалке выбираем её список,
   // иначе прокрутка уходила бы в чат за спиной у диалога.
   function pickScroller () {
@@ -202,7 +202,7 @@
 
   // Диагностика для живого DOM (DevTools -> __maxShellScroll.debug()): сколько
   // кандидатов-скроллов найдено, взят ли он, сколько в нём сообщений. Если
-  // web.max.ru сменит разметку и фича «умрёт молча», видно сразу какой
+  // web.max.ru сменит разметку и фича «умрёт молча» — видно сразу, какой
   // предположительный селектор перестал совпадать.
   function debug () {
     const all = Array.prototype.slice.call(document.querySelectorAll('.scrollListScrollable'))
