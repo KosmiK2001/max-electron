@@ -403,6 +403,26 @@ function injectTitlebar (win) {
 
   // --- Прокрутка чата: PageUp/PageDown + кнопки титлбара ---
   injectChatScroller(win)
+
+  // --- Дедупликация системных уведомлений ---
+  injectNotifDedupe(win)
+}
+
+// Инжект notif-dedupe.js: перехватывает Notification и подавляет точные повторы
+// в окне 60 сек. Лог SHOW/DUP уходит в ~/.config/MAX/dedupe.log.
+function injectNotifDedupe (win) {
+  if (!win || win.isDestroyed()) return
+  const wc = win.webContents
+  let src
+  try {
+    src = fs.readFileSync(join(__dirname, 'assets', 'notif-dedupe.js'), 'utf8')
+  } catch (e) {
+    console.error('[max-electron] read notif-dedupe.js:', e && e.message)
+    return
+  }
+  Promise.resolve()
+    .then(() => wc.executeJavaScript(src, false))
+    .catch((e) => console.error('[max-electron] inject notif dedupe:', e && e.message))
 }
 
 // Инжект chat-scroller.js: отдельный файл (как unread-watcher.js), читается с
@@ -479,6 +499,28 @@ function setupTitlebarIpc () {
   ipcMain.on('shell:close', () => { if (state.win) state.win.close() })
   ipcMain.handle('shell:is-maximized', () => !!(state.win && state.win.isMaximized()))
   ipcMain.on('shell:unread-messages', (_e, p) => onUnreadMessages(p))
+  ipcMain.on('shell:notif-log', (_e, p) => onNotifLog(p))
+  ipcMain.on('shell:show', () => showWindow())
+}
+
+// Лог дедупликации уведомлений: пишем в ~/.config/MAX/dedupe.log (append).
+// Формат строки: ISO\tTYPE\tdelta_ms\ttitle\tbody  (переносы/табы в тексте
+// заменены на пробелы, чтобы строка была однострочной для grep/sort).
+function onNotifLog (p) {
+  if (!p || typeof p.type !== 'string') return
+  const one = (s) => String(s == null ? '' : s).replace(/[\r\n\t]+/g, ' ').slice(0, 500)
+  const line = [
+    new Date().toISOString(),
+    p.type,
+    typeof p.delta === 'number' ? p.delta : '',
+    one(p.title),
+    one(p.body)
+  ].join('\t') + '\n'
+  try {
+    fs.appendFileSync(join(app.getPath('userData'), 'dedupe.log'), line, 'utf8')
+  } catch (e) {
+    console.error('[max-electron] write dedupe.log:', e && e.message)
+  }
 }
 
 // Приём числа непрочитанных сообщений от watcher'а в странице

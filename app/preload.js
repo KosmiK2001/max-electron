@@ -20,5 +20,10 @@ contextBridge.exposeInMainWorld('maxShell', {
   },
   // Непрочитанные СООБЩЕНИЯ (считает инжект в странице) + готовые иконки трея.
   // Только приём числа внутрь; страница не может ничего запросить/сделать.
-  setUnread: (payload) => ipcRenderer.send('shell:unread-messages', payload)
+  setUnread: (payload) => ipcRenderer.send('shell:unread-messages', payload),
+  // Лог дедупликации уведомлений (SHOW/DUP) — только приём строки внутрь.
+  notifLog: (payload) => ipcRenderer.send('shell:notif-log', payload),
+  // Показать/сфокусировать окно (для клика по уведомлению, когда окно скрыто
+  // в трее — window.focus() на скрытом окне не работает).
+  show: () => ipcRenderer.send('shell:show')
 })
