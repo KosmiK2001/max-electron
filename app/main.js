@@ -309,6 +309,24 @@ const TB_CSS = `
   overflow: hidden !important;
 }
 #max-shell-content > * { height: 100% !important; }
+/* ФИКС «утопающего» поля ввода. Страница держит height:100vh на layout-цепочке
+   (container → app → main → content), а наша обёртка на 38px ниже (титлбар):
+   низ (composer) уезжал за край и обрезался. Сжимаем layout до высоты обёртки.
+   Запас 4px даём ТОЛЬКО правой панели (.main) — иначе зазор вылезал бы снизу
+   в списке чатов (.aside), который должен доходить до низа окна.
+   Селекторы СТРУКТУРНЫЕ (без svelte-хэшей) — переживают пересборку клиента;
+   .layer/.openedChat/.calls уникальны по классу.
+   Проверено на живом DOM (CDP): aside bottom == innerHeight (без зазора),
+   composer bottom == innerHeight - 4 (поле ввода в кадре). */
+#max-shell-content > #app > .container,
+#max-shell-content .container > .app,
+#max-shell-content .app > .navigation,
+#max-shell-content .app > .aside,
+#max-shell-content .main > .content:first-child,
+#max-shell-content .layer,
+#max-shell-content .openedChat,
+#max-shell-content .calls { height: 100% !important; max-height: 100% !important; }
+#max-shell-content .app > .main { height: calc(100% - 4px) !important; max-height: calc(100% - 4px) !important; }
 `
 
 // Инъекция выполняется в главном мире страницы (executeJavaScript), поэтому
